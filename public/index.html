@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Переводчик RU ↔ NO</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0f0f0f; color: #fff;
+      font-family: Arial, sans-serif;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 100vh; padding: 20px;
+    }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    .langs { font-size: 18px; color: #aaa; margin-bottom: 40px; }
+    .btn {
+      width: 160px; height: 160px; border-radius: 50%;
+      border: none; font-size: 20px; cursor: pointer;
+      background: #1db954; color: white; transition: all 0.2s;
+    }
+    .btn.active { background: #e53935; transform: scale(1.05); }
+    .btn.speaking { background: #ff9800; transform: scale(1.08); }
+    .btn.processing { background: #9c27b0; transform: scale(1.0); }
+    .status { margin-top: 24px; font-size: 16px; color: #aaa; min-height: 24px; }
+    .cards { margin-top: 30px; width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 12px; }
+    .card { background: #1a1a1a; border-radius: 12px; padding: 16px 20px; font-size: 16px; line-height: 1.6; border-left: 4px solid transparent; }
+    .card.original { border-left-color: #555; color: #aaa; }
+    .card.translated { border-left-color: #1db954; color: #fff; }
+    .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #555; margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Переводчик</h1>
+  <div class="langs">🇷🇺 RU ↔ NO 🇳🇴</div>
+  <button class="btn" id="btn">Старт</button>
+  <div class="status" id="status">Нажми кнопку чтобы начать</div>
+  <div class="cards">
+    <div class="card original">
+      <div class="card-label">Оригинал</div>
+      <div id="original">—</div>
+    </div>
+    <div class="card translated">
+      <div class="card-label">Перевод</div>
+      <div id="translated">—</div>
+    </div>
+  </div>
+
+  <script>
+    const btn = document.getElementById('btn');
+    const status = document.getElementById('status');
+    const originalEl = document.getElementById('original');
+    const translatedEl = document.getElementById('translated');
+
+    let ws, isActive = false;
+    let audioCtx, analyser, stream, processor;
+    let isSpeaking = false, silenceTimer = null;
+    let pcmData = [];
+    // Заблокирован пока играет озвучка или идёт обработка
+    let isLocked = false;
+
+    const THRESHOLD = 15;
+    const SILENCE_MS = 1500;
+    const SAMPLE_RATE = 16000;
+
+    btn.addEventListener('click', () => {
+      if (!isActive) start();
+      else stop();
+    });
+
+    async function start() {
+      isActive = true;
+      btn.textContent = 'Стоп';
+      btn.classList.add('active');
+      status.textContent = 'Подключение...';
+
+      ws = new WebSocket('ws://localhost:3000');
+
+      ws.onopen = async () => {
+        status.textContent = '● Слушаю...';
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { sampleRate: SAMPLE_RATE, channelCount: 1 }
+        });
+
+        audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        processor = audioCtx.createScriptProcessor(2048, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          // Если заблокировано — не слушаем
+          if (isLocked) return;
+
+          const input = e.inputBuffer.getChannelData(0);
+          const volume = getVolume();
+
+          if (volume > THRESHOLD) {
+            if (!isSpeaking) {
+              isSpeaking = true;
+              pcmData = [];
+              btn.classList.add('speaking');
+              status.textContent = '🎤 Говорит...';
+            }
+            if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+            pcmData.push(new Float32Array(input));
+
+          } else if (isSpeaking) {
+            pcmData.push(new Float32Array(input));
+            if (!silenceTimer) {
+              silenceTimer = setTimeout(() => {
+                isSpeaking = false;
+                silenceTimer = null;
+                btn.classList.remove('speaking');
+                btn.classList.add('processing');
+                status.textContent = '⏳ Обрабатываю...';
+                isLocked = true;
+                sendAudio();
+              }, SILENCE_MS);
+            }
+          }
+        };
+
+        source.connect(analyser);
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'translation') {
+          originalEl.textContent = msg.original;
+          translatedEl.textContent = msg.translated;
+        }
+
+        if (msg.type === 'audio') {
+          btn.classList.remove('processing');
+          status.textContent = '🔊 Перевод...';
+          const audio = new Audio('data:audio/mp3;base64,' + msg.data);
+          audio.onended = () => {
+            // Разблокируем микрофон только после окончания озвучки
+            isLocked = false;
+            if (isActive) {
+              btn.classList.remove('processing');
+              status.textContent = '● Слушаю...';
+            }
+          };
+          audio.play();
+        }
+
+        if (msg.type === 'ready') {
+          // Сервер пропустил фразу — разблокируем
+          isLocked = false;
+          btn.classList.remove('processing');
+          if (isActive) status.textContent = '● Слушаю...';
+        }
+      };
+
+      ws.onerror = () => {
+        status.textContent = 'Ошибка';
+        isLocked = false;
+      };
+    }
+
+    function getVolume() {
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      return data.reduce((a, b) => a + b, 0) / data.length;
+    }
+
+    function sendAudio() {
+      if (pcmData.length === 0) { isLocked = false; return; }
+
+      const totalLen = pcmData.reduce((s, c) => s + c.length, 0);
+      const pcm = new Float32Array(totalLen);
+      let offset = 0;
+      for (const chunk of pcmData) { pcm.set(chunk, offset); offset += chunk.length; }
+      pcmData = [];
+
+      const int16 = new Int16Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32768));
+      }
+
+      const dataLen = int16.length * 2;
+      const buf = new ArrayBuffer(44 + dataLen);
+      const v = new DataView(buf);
+      const s = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+      s(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true);
+      s(8, 'WAVE'); s(12, 'fmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+      v.setUint16(22, 1, true); v.setUint32(24, SAMPLE_RATE, true);
+      v.setUint32(28, SAMPLE_RATE * 2, true); v.setUint16(32, 2, true);
+      v.setUint16(34, 16, true); s(36, 'data');
+      v.setUint32(40, dataLen, true);
+      for (let i = 0; i < int16.length; i++) v.setInt16(44 + i * 2, int16[i], true);
+
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const base64 = btoa(binary);
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'audio_chunk', audio: base64 }));
+      }
+    }
+
+    function stop() {
+      isActive = false;
+      isSpeaking = false;
+      isLocked = false;
+      if (silenceTimer) clearTimeout(silenceTimer);
+      btn.textContent = 'Старт';
+      btn.classList.remove('active', 'speaking', 'processing');
+      status.textContent = 'Нажми кнопку чтобы начать';
+      if (processor) processor.disconnect();
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (audioCtx) audioCtx.close();
+      if (ws) ws.close();
+    }
+  </script>
+</body>
+</html>
