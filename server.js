@@ -33,15 +33,13 @@ wss.on('connection', (clientWs) => {
         file: fs.createReadStream(tmpFile),
         model: 'whisper-1',
         response_format: 'verbose_json',
-        prompt: 'Norsk eller russisk tale. Говорим по-русски или по-норвежски.'
+        language: 'no'
       });
 
       if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
 
       const text = transcription.text.trim();
-      const whisperLang = transcription.language || '';
-      console.log(`Whisper: [${whisperLang}] ${text}`);
-      console.log('Длина текста:', text.length);
+      console.log(`Whisper NO: ${text}`);
 
       if (!text || text.length < 3) {
         isProcessing = false;
@@ -50,33 +48,24 @@ wss.on('connection', (clientWs) => {
       }
 
       const result = await openai.chat.completions.create({
-  model: 'gpt-4o-mini',
-  messages: [
-    {
-      role: 'system',
-      content: 'You are a translator. Translate Russian to Norwegian and Norwegian to Russian. Return ONLY the translation.'
-    },
-    { 
-      role: 'user', 
-      content: `Translate this text: "${text}"` 
-    }
-  ]
-});
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a translator. Translate Norwegian to Russian. Return ONLY the translation.'
+          },
+          {
+            role: 'user',
+            content: `Translate from Norwegian to Russian: "${text}"`
+          }
+        ]
+      });
 
       const translated = result.choices[0].message.content.trim();
-      console.log('Входной текст был:', text);
-      console.log('Результат GPT:', translated);
-
-      if (translated === 'ERROR' || translated.startsWith('ERROR')) {
-        console.log('Не распознано — пропускаем');
-        isProcessing = false;
-        clientWs.send(JSON.stringify({ type: 'ready' }));
-        return;
-      }
+      console.log('Перевод:', translated);
 
       clientWs.send(JSON.stringify({ type: 'translation', original: text, translated }));
 
-      console.log('Озвучиваем...');
       const speech = await openai.audio.speech.create({
         model: 'tts-1',
         voice: 'nova',
