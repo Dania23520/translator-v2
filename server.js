@@ -28,7 +28,6 @@ wss.on('connection', (clientWs) => {
       const tmpFile = path.join(__dirname, 'tmp.wav');
       fs.writeFileSync(tmpFile, audioBuffer);
 
-      // Транскрипция
       console.log('Транскрибируем...');
       const transcription = await openai.audio.transcriptions.create({
         file: fs.createReadStream(tmpFile),
@@ -42,46 +41,41 @@ wss.on('connection', (clientWs) => {
       const text = transcription.text.trim();
       const whisperLang = transcription.language || '';
       console.log(`Whisper: [${whisperLang}] ${text}`);
+      console.log('Длина текста:', text.length);
 
-      if (!text || text.length < 3) { isProcessing = false; return; }
-
-      // Определяем язык через GPT
-      const langResult = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: 'Is this text Russian or Norwegian? Reply with only: "russian" or "norwegian".' },
-          { role: 'user', content: text }
-        ]
-      });
-
-      const lang = langResult.choices[0].message.content.trim().toLowerCase();
-      console.log(`GPT язык: ${lang}`);
-
-      if (lang !== 'russian' && lang !== 'norwegian') {
-        console.log('Не тот язык, пропускаем');
+      if (!text || text.length < 3) {
         isProcessing = false;
         clientWs.send(JSON.stringify({ type: 'ready' }));
         return;
       }
 
-      const targetLang = lang === 'russian' ? 'Norwegian' : 'Russian';
+      const result = await openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    {
+      role: 'system',
+      content: 'You are a translator. Translate Russian to Norwegian and Norwegian to Russian. Return ONLY the translation.'
+    },
+    { 
+      role: 'user', 
+      content: `Translate this text: "${text}"` 
+    }
+  ]
+});
 
-      // Перевод
-      console.log('Переводим на', targetLang);
-      const translation = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: `Translate to ${targetLang}. Return ONLY the translation, nothing else.` },
-          { role: 'user', content: text }
-        ]
-      });
+      const translated = result.choices[0].message.content.trim();
+      console.log('Входной текст был:', text);
+      console.log('Результат GPT:', translated);
 
-      const translated = translation.choices[0].message.content.trim();
-      console.log('Перевод:', translated);
+      if (translated === 'ERROR' || translated.startsWith('ERROR')) {
+        console.log('Не распознано — пропускаем');
+        isProcessing = false;
+        clientWs.send(JSON.stringify({ type: 'ready' }));
+        return;
+      }
 
       clientWs.send(JSON.stringify({ type: 'translation', original: text, translated }));
 
-      // Озвучка
       console.log('Озвучиваем...');
       const speech = await openai.audio.speech.create({
         model: 'tts-1',
