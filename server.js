@@ -30,104 +30,112 @@ wss.on('connection', (clientWs) => {
       fs.writeFileSync(tmpRu, audioBuffer);
       fs.writeFileSync(tmpNo, audioBuffer);
 
-      console.log('Запускаем две системы параллельно...');
-
-      // Система 1: Русский → Норвежский
-      // Система 2: Норвежский → Русский
-      const [resultRuToNo, resultNoToRu] = await Promise.all([
-        // Система 1
-        (async () => {
-          const trans = await openai.audio.transcriptions.create({
-            file: fs.createReadStream(tmpRu),
-            model: 'whisper-1',
-            response_format: 'verbose_json',
-            language: 'ru'
-          });
-          const text = trans.text.trim();
-          if (!text || text.length < 3) return null;
-          const gpt = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: [
-              { role: 'system', content: 'Translate Russian to Norwegian. Return ONLY the translation.' },
-              { role: 'user', content: text }
-            ]
-          });
-          return { original: text, translated: gpt.choices[0].message.content.trim(), lang: 'no' };
-        })(),
-        // Система 2
-        (async () => {
-          const trans = await openai.audio.transcriptions.create({
-            file: fs.createReadStream(tmpNo),
-            model: 'whisper-1',
-            response_format: 'verbose_json',
-            language: 'no'
-          });
-          const text = trans.text.trim();
-          if (!text || text.length < 3) return null;
-          const gpt = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: [
-              { role: 'system', content: 'Translate Norwegian to Russian. Return ONLY the translation.' },
-              { role: 'user', content: text }
-            ]
-          });
-          return { original: text, translated: gpt.choices[0].message.content.trim(), lang: 'ru' };
-        })()
+      // Шаг 1 — две транскрипции параллельно
+      console.log('Транскрибируем параллельно...');
+      const [transRu, transNo] = await Promise.all([
+        openai.audio.transcriptions.create({
+          file: fs.createReadStream(tmpRu),
+          model: 'gpt-4o-transcribe',
+          response_format: 'json',
+          language: 'ru'  // или 'no'
+        }),
+        openai.audio.transcriptions.create({
+          file: fs.createReadStream(tmpNo),
+          model: 'gpt-4o-transcribe',
+          response_format: 'json',
+          language: 'no'  // или 'no'
+        })
       ]);
 
       if (fs.existsSync(tmpRu)) fs.unlinkSync(tmpRu);
       if (fs.existsSync(tmpNo)) fs.unlinkSync(tmpNo);
 
-      console.log('Система 1 (RU→NO):', resultRuToNo);
-      console.log('Система 2 (NO→RU):', resultNoToRu);
+      const textRu = transRu.text.trim();
+      const textNo = transNo.text.trim();
 
-      // Система 3: Арбитр — выбирает правильный результат
+      console.log(`Whisper RU: ${textRu}`);
+      console.log(`Whisper NO: ${textNo}`);
+
+      if (!textRu && !textNo) {
+        isProcessing = false;
+        clientWs.send(JSON.stringify({ type: 'ready' }));
+        return;
+      }
+
+      // Шаг 2 — арбитр определяет язык ДО перевода
+      console.log('Арбитр определяет язык...');
       const arbiter = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
-            content: `You are an arbiter between two translation systems.
-System 1 assumed the audio was Russian and translated to Norwegian.
-System 2 assumed the audio was Norwegian and translated to Russian.
+            content: `You are a language detector.
+You receive two transcriptions of the same audio.
+One was forced as Russian, one was forced as Norwegian.
+Your job is to determine which transcription is real human speech.
 
-Your job:
-1. Look at both original transcriptions
-2. Decide which system got the correct original language
-3. Return ONLY the translation from the correct system
-4. Return nothing else - just the translated text`
+Rules:
+- Look at both texts
+- Real speech has proper words, grammar, and meaning
+- Gibberish has random sounds, mixed characters, or no meaning
+- Return ONLY one word: "russian" or "norwegian"
+- Never return anything else`
           },
           {
             role: 'user',
-            content: `System 1 original (assumed Russian): "${resultRuToNo?.original || ''}"
-System 1 translation (to Norwegian): "${resultRuToNo?.translated || ''}"
-
-System 2 original (assumed Norwegian): "${resultNoToRu?.original || ''}"
-System 2 translation (to Russian): "${resultNoToRu?.translated || ''}"
-
-Which system got the correct language? Return only the translation.`
+            content: `Russian transcription: "${textRu}"
+Norwegian transcription: "${textNo}"
+Which one is real speech?`
           }
         ]
       });
 
-      const finalTranslation = arbiter.choices[0].message.content.trim();
-      const finalLang = resultNoToRu?.translated === finalTranslation ? 'ru' : 'no';
+      const detectedLang = arbiter.choices[0].message.content.trim().toLowerCase();
+      console.log('Арбитр решил:', detectedLang);
 
-      console.log('Финальный перевод:', finalTranslation);
-      console.log('Язык озвучки:', finalLang);
+      if (detectedLang !== 'russian' && detectedLang !== 'norwegian') {
+        console.log('Арбитр не смог определить — пропускаем');
+        isProcessing = false;
+        clientWs.send(JSON.stringify({ type: 'ready' }));
+        return;
+      }
+
+      // Шаг 3 — перевод правильного текста
+      const sourceText = detectedLang === 'russian' ? textRu : textNo;
+      const targetLang = detectedLang === 'russian' ? 'Norwegian' : 'Russian';
+      const voice = detectedLang === 'russian' ? 'onyx' : 'nova';
+
+      console.log(`Переводим с ${detectedLang} на ${targetLang}: ${sourceText}`);
+
+      const translation = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `Translate to ${targetLang}. Return ONLY the translation.`
+          },
+          {
+            role: 'user',
+            content: sourceText
+          }
+        ]
+      });
+
+      const translated = translation.choices[0].message.content.trim();
+      console.log('Перевод:', translated);
 
       clientWs.send(JSON.stringify({
         type: 'translation',
-        original: finalLang === 'ru' ? resultNoToRu?.original : resultRuToNo?.original,
-        translated: finalTranslation
+        original: sourceText,
+        translated
       }));
 
-      // Озвучка с правильным голосом
-      const voice = finalLang === 'ru' ? 'nova' : 'onyx';
+      // Шаг 4 — озвучка
+      console.log('Озвучиваем голосом:', voice);
       const speech = await openai.audio.speech.create({
         model: 'tts-1',
         voice: voice,
-        input: finalTranslation,
+        input: translated,
         response_format: 'mp3'
       });
 
