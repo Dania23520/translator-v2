@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Переводчик RU ↔ NO</title>
+  <title>Переводчик NO → RU</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -20,9 +20,10 @@
       border: none; font-size: 20px; cursor: pointer;
       background: #1db954; color: white; transition: all 0.2s;
     }
-    .btn.active { background: #e53935; transform: scale(1.05); }
-    .btn.speaking { background: #ff9800; transform: scale(1.08); }
-    .btn.processing { background: #9c27b0; transform: scale(1.0); }
+    .btn.listening { background: #e53935; transform: scale(1.05); }
+    .btn.recording { background: #ff9800; transform: scale(1.08); }
+    .btn.processing { background: #9c27b0; }
+    .btn.playing { background: #2196F3; }
     .status { margin-top: 24px; font-size: 16px; color: #aaa; min-height: 24px; }
     .cards { margin-top: 30px; width: 100%; max-width: 600px; display: flex; flex-direction: column; gap: 12px; }
     .card { background: #1a1a1a; border-radius: 12px; padding: 16px 20px; font-size: 16px; line-height: 1.6; border-left: 4px solid transparent; }
@@ -33,16 +34,16 @@
 </head>
 <body>
   <h1>Переводчик</h1>
-  <div class="langs">🇷🇺 RU ↔ NO 🇳🇴</div>
+  <div class="langs">🇳🇴 NO → RU 🇷🇺</div>
   <button class="btn" id="btn">Старт</button>
   <div class="status" id="status">Нажми кнопку чтобы начать</div>
   <div class="cards">
     <div class="card original">
-      <div class="card-label">Оригинал</div>
+      <div class="card-label">Норвежский</div>
       <div id="original">—</div>
     </div>
     <div class="card translated">
-      <div class="card-label">Перевод</div>
+      <div class="card-label">Русский перевод</div>
       <div id="translated">—</div>
     </div>
   </div>
@@ -57,11 +58,12 @@
     let audioCtx, analyser, stream, processor;
     let isSpeaking = false, silenceTimer = null;
     let pcmData = [];
-    // Заблокирован пока играет озвучка или идёт обработка
     let isLocked = false;
+    let recordStartTime = null;
 
     const THRESHOLD = 15;
     const SILENCE_MS = 2500;
+    const MIN_RECORD_MS = 1500;
     const SAMPLE_RATE = 16000;
 
     btn.addEventListener('click', () => {
@@ -72,13 +74,11 @@
     async function start() {
       isActive = true;
       btn.textContent = 'Стоп';
-      btn.classList.add('active');
       status.textContent = 'Подключение...';
 
       ws = new WebSocket('ws://localhost:3000');
 
       ws.onopen = async () => {
-        status.textContent = '● Слушаю...';
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { sampleRate: SAMPLE_RATE, channelCount: 1 }
         });
@@ -91,29 +91,41 @@
         processor = audioCtx.createScriptProcessor(2048, 1, 1);
 
         processor.onaudioprocess = (e) => {
-          // Если заблокировано — не слушаем
           if (isLocked) return;
 
           const input = e.inputBuffer.getChannelData(0);
           const volume = getVolume();
 
-          if (volume > THRESHOLD) {
-            if (!isSpeaking) {
-              isSpeaking = true;
-              pcmData = [];
-              btn.classList.add('speaking');
-              status.textContent = '🎤 Говорит...';
-            }
-            if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-            pcmData.push(new Float32Array(input));
+          if (!isSpeaking) {
+            isSpeaking = true;
+            pcmData = [];
+            recordStartTime = Date.now();
+            btn.classList.remove('listening');
+            btn.classList.add('recording');
+            status.textContent = '🎤 Запись...';
+          }
 
-          } else if (isSpeaking) {
-            pcmData.push(new Float32Array(input));
+          pcmData.push(new Float32Array(input));
+
+          if (volume > THRESHOLD) {
+            if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+          } else {
             if (!silenceTimer) {
               silenceTimer = setTimeout(() => {
-                isSpeaking = false;
                 silenceTimer = null;
-                btn.classList.remove('speaking');
+
+                const recordedMs = Date.now() - recordStartTime;
+                if (recordedMs < MIN_RECORD_MS) {
+                  console.log(`Слишком короткая запись (${recordedMs}мс) — сбрасываем`);
+                  isSpeaking = false;
+                  pcmData = [];
+                  recordStartTime = null;
+                  return;
+                }
+
+                isSpeaking = false;
+                recordStartTime = null;
+                btn.classList.remove('recording');
                 btn.classList.add('processing');
                 status.textContent = '⏳ Обрабатываю...';
                 isLocked = true;
@@ -126,6 +138,9 @@
         source.connect(analyser);
         source.connect(processor);
         processor.connect(audioCtx.destination);
+
+        btn.classList.add('listening');
+        status.textContent = '● Слушаю...';
       };
 
       ws.onmessage = (event) => {
@@ -138,29 +153,40 @@
 
         if (msg.type === 'audio') {
           btn.classList.remove('processing');
+          btn.classList.add('playing');
           status.textContent = '🔊 Перевод...';
+
           const audio = new Audio('data:audio/mp3;base64,' + msg.data);
           audio.onended = () => {
-            // Разблокируем микрофон только после окончания озвучки
             isLocked = false;
-            if (isActive) {
-              btn.classList.remove('processing');
-              status.textContent = '● Слушаю...';
-            }
+            isSpeaking = false;
+            pcmData = [];
+            recordStartTime = null;
+            if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+            btn.classList.remove('playing');
+            btn.classList.add('recording');
+            if (isActive) status.textContent = '🎤 Запись...';
           };
-          audio.play();
+          audio.play().catch(e => {
+            console.error('Ошибка:', e);
+            isLocked = false;
+          });
         }
 
         if (msg.type === 'ready') {
-          // Сервер пропустил фразу — разблокируем
           isLocked = false;
+          isSpeaking = false;
+          pcmData = [];
+          recordStartTime = null;
+          if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
           btn.classList.remove('processing');
-          if (isActive) status.textContent = '● Слушаю...';
+          btn.classList.add('recording');
+          if (isActive) status.textContent = '🎤 Запись...';
         }
       };
 
       ws.onerror = () => {
-        status.textContent = 'Ошибка';
+        status.textContent = 'Ошибка подключения';
         isLocked = false;
       };
     }
@@ -214,7 +240,7 @@
       isLocked = false;
       if (silenceTimer) clearTimeout(silenceTimer);
       btn.textContent = 'Старт';
-      btn.classList.remove('active', 'speaking', 'processing');
+      btn.classList.remove('listening', 'recording', 'processing', 'playing');
       status.textContent = 'Нажми кнопку чтобы начать';
       if (processor) processor.disconnect();
       if (stream) stream.getTracks().forEach(t => t.stop());
