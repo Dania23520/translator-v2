@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Переводчик NO → RU</title>
+  <title>Переводчик RU ↔ NO</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -34,16 +34,16 @@
 </head>
 <body>
   <h1>Переводчик</h1>
-  <div class="langs">🇷🇺 RU → NO 🇳🇴</div>
+  <div class="langs">🇷🇺 RU ↔ NO 🇳🇴</div>
   <button class="btn" id="btn">Старт</button>
   <div class="status" id="status">Нажми кнопку чтобы начать</div>
   <div class="cards">
     <div class="card original">
-      <div class="card-label">Русский</div>
+      <div class="card-label">Оригинал</div>
       <div id="original">—</div>
     </div>
     <div class="card translated">
-      <div class="card-label">Норвежский перевод</div>
+      <div class="card-label">Перевод</div>
       <div id="translated">—</div>
     </div>
   </div>
@@ -62,8 +62,8 @@
     let recordStartTime = null;
 
     const THRESHOLD = 15;
-    const SILENCE_MS = 2500;
-    const MIN_RECORD_MS = 1500;
+    const SILENCE_MS = 3000;
+    const MIN_RECORD_MS = 3000;
     const SAMPLE_RATE = 16000;
 
     btn.addEventListener('click', () => {
