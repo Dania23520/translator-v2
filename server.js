@@ -33,14 +33,14 @@ wss.on('connection', (clientWs) => {
       const audioBase64 = msg.audio;
 
       // Шаг 1 — Google Speech
-      console.log('📡 ШАГ 1: Google Speech (no-NO)...');
+      console.log('📡 ШАГ 1: Google Speech (ru-RU)...');
       const t1 = Date.now();
       const [speechResponse] = await googleSpeech.recognize({
         audio: { content: audioBase64 },
         config: {
           encoding: 'LINEAR16',
           sampleRateHertz: 16000,
-          languageCode: 'no-NO',
+          languageCode: 'ru-RU',
           model: 'latest_long'
         }
       });
@@ -66,7 +66,7 @@ wss.on('connection', (clientWs) => {
       const result = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: 'Переведи с норвежского на русский. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений.' },
+          { role: 'system', content: 'Переведи с русского на норвежский. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений.' },
           { role: 'user', content: text }
         ]
       });
@@ -78,11 +78,11 @@ wss.on('connection', (clientWs) => {
       clientWs.send(JSON.stringify({ type: 'translated', text: translated }));
 
       // Шаг 3 — OpenAI TTS
-      console.log('🔊 ШАГ 3: OpenAI TTS (onyx)...');
+      console.log('🔊 ШАГ 3: OpenAI TTS (nova)...');
       const t3 = Date.now();
       const tts = await openai.audio.speech.create({
         model: 'tts-1',
-        voice: 'onyx',
+        voice: 'nova',
         input: translated,
         response_format: 'mp3'
       });
