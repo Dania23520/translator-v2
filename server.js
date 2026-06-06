@@ -3,16 +3,21 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-const OpenAI = require('openai');
 const speech = require('@google-cloud/speech');
 const textToSpeech = require('@google-cloud/text-to-speech');
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 const googleSpeech = new speech.SpeechClient({ apiKey: process.env.GOOGLE_API_KEY });
 const googleTTS = new textToSpeech.TextToSpeechClient({ apiKey: process.env.GOOGLE_TTS_KEY });
+const ai = new GoogleGenAI({
+  vertexai: true,
+  project: 'project-955a0a8b-63ea-489f-a2f',
+  location: 'europe-west1'
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -27,13 +32,15 @@ wss.on('connection', (clientWs) => {
       if (isProcessing) { console.log('⏳ Занят'); return; }
       isProcessing = true;
 
+      const tTotal = Date.now();
       console.log('\n════════════════════════════════');
       console.log('🎤 НОВЫЙ ЗАПРОС');
 
       const audioBase64 = msg.audio;
 
       // Шаг 1 — Google Speech
-      console.log('📡 ШАГ 1: Google Speech (no-NO)...');
+      console.log('📡 ШАГ 1: Google Speech...');
+      const t1 = Date.now();
       const [speechResponse] = await googleSpeech.recognize({
         audio: { content: audioBase64 },
         config: {
@@ -43,6 +50,7 @@ wss.on('connection', (clientWs) => {
           model: 'latest_long'
         }
       });
+      console.log(`   ⏱ Speech: ${Date.now()-t1}мс`);
 
       const text = speechResponse.results?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
       const confidence = speechResponse.results?.[0]?.alternatives?.[0]?.confidence || 0;
@@ -55,37 +63,40 @@ wss.on('connection', (clientWs) => {
         return;
       }
 
-      // Шаг 2 — GPT-4o перевод
-      console.log('🔄 ШАГ 2: GPT-4o переводит...');
-      const translation = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: 'Переведи с норвежского на русский. Расставь знаки препинания — запятые, точки, вопросительные и восклицательные знаки. Используй правильные падежи. Верни ТОЛЬКО перевод.' },
-          { role: 'user', content: text }
-        ]
+      // Сразу показываем оригинал
+      clientWs.send(JSON.stringify({ type: 'original', text }));
+
+      // Шаг 2 — Gemini перевод
+      console.log('🔄 ШАГ 2: Gemini переводит...');
+      const t2 = Date.now();
+      const result = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `Переведи с норвежского на русский. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений:\n${text}`
       });
-      const translated = translation.choices[0].message.content.trim();
+      const translated = result.text.trim();
+      console.log(`   ⏱ Gemini: ${Date.now()-t2}мс`);
       console.log(`   Перевод: "${translated}"`);
 
-      clientWs.send(JSON.stringify({ type: 'translation', original: text, translated }));
+      // Сразу показываем перевод
+      clientWs.send(JSON.stringify({ type: 'translated', text: translated }));
 
       // Шаг 3 — Google TTS
       console.log('🔊 ШАГ 3: Google TTS...');
+      const t3 = Date.now();
       const [ttsResponse] = await googleTTS.synthesizeSpeech({
         input: { text: translated },
-        voice: { languageCode: 'ru-RU', name: 'ru-RU-Wavenet-D' },
+        voice: { languageCode: 'ru-RU', name: 'ru-RU-Standard-D' },
         audioConfig: { audioEncoding: 'MP3' }
       });
+      console.log(`   ⏱ TTS: ${Date.now()-t3}мс`);
 
-      const audioContent = ttsResponse.audioContent;
-const audioOut = typeof audioContent === 'string' 
-  ? audioContent 
-  : Buffer.from(audioContent).toString('base64');
-console.log(`   Тип audioContent: ${typeof audioContent}`);
-console.log(`   Размер: ${audioContent.length}`);
-      console.log(`   Аудио размер: ${ttsResponse.audioContent.length} байт`);
+      const audioOut = typeof ttsResponse.audioContent === 'string'
+        ? ttsResponse.audioContent
+        : Buffer.from(ttsResponse.audioContent).toString('base64');
+
       clientWs.send(JSON.stringify({ type: 'audio', data: audioOut }));
 
+      console.log(`⏱ ИТОГО: ${Date.now()-tTotal}мс`);
       console.log('✅ ГОТОВО');
       isProcessing = false;
 

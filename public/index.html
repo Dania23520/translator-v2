@@ -113,16 +113,13 @@
             if (!silenceTimer) {
               silenceTimer = setTimeout(() => {
                 silenceTimer = null;
-
                 const recordedMs = Date.now() - recordStartTime;
                 if (recordedMs < MIN_RECORD_MS) {
-                  console.log(`Слишком короткая запись (${recordedMs}мс) — сбрасываем`);
                   isSpeaking = false;
                   pcmData = [];
                   recordStartTime = null;
                   return;
                 }
-
                 isSpeaking = false;
                 recordStartTime = null;
                 btn.classList.remove('recording');
@@ -146,9 +143,12 @@
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
 
-        if (msg.type === 'translation') {
-          originalEl.textContent = msg.original;
-          translatedEl.textContent = msg.translated;
+        if (msg.type === 'original') {
+          originalEl.textContent = msg.text;
+        }
+
+        if (msg.type === 'translated') {
+          translatedEl.textContent = msg.text;
         }
 
         if (msg.type === 'audio') {
