@@ -15,21 +15,6 @@ const googleSpeech = new speech.SpeechClient({ apiKey: process.env.GOOGLE_API_KE
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-let franc;
-(async () => {
-  const francModule = await import('franc');
-  franc = francModule.franc;
-})();
-
-function analyzeLanguage(text) {
-  if (!franc || !text) return { ru: 0, no: 0 };
-  const result = franc(text, { minLength: 3, only: ['rus', 'nno', 'nob'] });
-  // franc возвращает строку с кодом языка
-  const isRu = result === 'rus';
-  const isNo = result === 'nno' || result === 'nob';
-  return { isRu, isNo, code: result };
-}
-
 wss.on('connection', (clientWs) => {
   console.log('✅ Клиент подключился');
   let isProcessing = false;
@@ -65,8 +50,9 @@ wss.on('connection', (clientWs) => {
       const textRu = ruResponse[0].results?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
       const textNo = noResponse[0].results?.[0]?.alternatives?.[0]?.transcript?.trim() || '';
 
-      console.log(`   RU: "${textRu}"`);
-      console.log(`   NO: "${textNo}"`);
+      console.log('\n📊 ИСХОДНЫЕ ДАННЫЕ:');
+      console.log(`   textRu: "${textRu}"`);
+      console.log(`   textNo: "${textNo}"`);
 
       if (!textRu && !textNo) {
         console.log('❌ ПРОПУСК: оба пустые');
@@ -75,105 +61,115 @@ wss.on('connection', (clientWs) => {
         return;
       }
 
-      // Шаг 2 — franc + сигналы
-      console.log('🔍 ШАГ 2: Анализ сигналов...');
+      // Шаг 2 — GPT арбитр
+      console.log('\n🤖 ШАГ 2: Арбитр анализирует...');
       const t2 = Date.now();
 
-      const ruAnalysis = analyzeLanguage(textRu);
-      const noAnalysis = analyzeLanguage(textNo);
+      const arbiter = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: `Ты арбитр системы распознавания языка Russian-Norwegian.
 
-      const noHasCyrillic = /[а-яёА-ЯЁ]/.test(textNo);
-      const ruHasLatin = /[a-zA-ZæøåÆØÅ]/.test(textRu);
+Тебе приходят два текста от одного аудио файла:
+- textRu: принудительно транскрибирован как русский
+- textNo: принудительно транскрибирован как норвежский
 
-      let ruVotes = 0;
-      let noVotes = 0;
+Один из них отражает реальную речь, другой — искажение или транслитерацию.
 
-      // Сигнал 1 — franc для RU текста
-      if (ruAnalysis.isRu) { ruVotes++; console.log('   ✅ Сигнал 1: franc RU текст = русский (+1 RU)'); }
-      else if (ruAnalysis.isNo) { noVotes++; console.log('   ✅ Сигнал 1: franc RU текст = норвежский (+1 NO)'); }
+ОБЯЗАТЕЛЬНО заполни таблицу строго YES или NO по каждому пункту. Никаких объяснений.
 
-      // Сигнал 2 — franc для NO текста
-      if (noAnalysis.isNo) { noVotes++; console.log('   ✅ Сигнал 2: franc NO текст = норвежский (+1 NO)'); }
-      else if (noAnalysis.isRu) { ruVotes++; console.log('   ✅ Сигнал 2: franc NO текст = русский (+1 RU)'); }
+ПРАВИЛО 1 — СМЫСЛ:
+textRu_exists: существуют ли эти слова в русском языке? YES/NO
+textNo_exists: существуют ли эти слова в норвежском языке? YES/NO
 
-      // Сигнал 3 — кириллица в NO тексте
-      if (noHasCyrillic) { ruVotes++; console.log('   ✅ Сигнал 3: NO выдал кириллицу (+1 RU)'); }
+ПРАВИЛО 2 — ГРАММАТИКА РУССКОГО (для textRu):
+textRu_conjugation: правильное спряжение глаголов по лицам и числам? YES/NO
+textRu_declension: правильное склонение существительных по падежам? YES/NO
+textRu_agreement: правильное согласование прилагательных по роду числу и падежу? YES/NO
+textRu_prepositions: используются русские предлоги? YES/NO
 
-      // Сигнал 4 — латиница в RU тексте
-      if (ruHasLatin) { noVotes++; console.log('   ✅ Сигнал 4: RU выдал латиницу (+1 NO)'); }
+ПРАВИЛО 3 — ГРАММАТИКА НОРВЕЖСКОГО (для textNo):
+textNo_articles: правильно используются артикли? YES/NO
+textNo_verbforms: правильные глагольные формы? YES/NO
+textNo_wordorder: соблюдается порядок слов SVO (глагол на втором месте)? YES/NO
+textNo_prepositions: используются норвежские предлоги? YES/NO
 
-      console.log(`   RU голоса: ${ruVotes} | NO голоса: ${noVotes}`);
-      console.log(`   ⏱ Анализ: ${Date.now()-t2}мс`);
+ПРАВИЛО 4 — ТРАНСЛИТЕРАЦИЯ:
+textRu_transliteration: слова написаны кириллицей но не существуют в русском и не подчиняются его грамматике? YES/NO
+textNo_transliteration: слова написаны латиницей но не существуют в норвежском и не подчиняются его грамматике? YES/NO
 
-      // Шаг 3 — решение
-      let sourceText, targetLang, voice;
+ПРАВИЛО 5 — АЛФАВИТ:
+textNo_has_cyrillic: textNo содержит кириллицу? YES/NO
+textRu_has_latin: textRu содержит латиницу или æøå? YES/NO
 
-      if (ruVotes > noVotes) {
-        sourceText = textRu;
-        targetLang = 'Norwegian';
-        voice = 'nova';
-        console.log(`   → РУССКИЙ побеждает (${ruVotes} vs ${noVotes})`);
-      } else if (noVotes > ruVotes) {
-        sourceText = textNo;
-        targetLang = 'Russian';
-        voice = 'onyx';
-        console.log(`   → НОРВЕЖСКИЙ побеждает (${noVotes} vs ${ruVotes})`);
-      } else {
-        // Ничья — смотрим на кириллицу в RU тексте
-        const ruHasCyrillic = /[а-яёА-ЯЁ]/.test(textRu);
-        if (ruHasCyrillic) {
-          sourceText = textRu;
-          targetLang = 'Norwegian';
-          voice = 'nova';
-          console.log(`   → НИЧЬЯ → RU содержит кириллицу → русский`);
-        } else {
-          sourceText = textNo;
-          targetLang = 'Russian';
-          voice = 'onyx';
-          console.log(`   → НИЧЬЯ → норвежский по умолчанию`);
-        }
-      }
+РЕШЕНИЕ:
+Русский получает очко за каждый YES в: textRu_exists, textRu_conjugation, textRu_declension, textRu_agreement, textRu_prepositions, textNo_transliteration, textNo_has_cyrillic.
+Норвежский получает очко за каждый YES в: textNo_exists, textNo_articles, textNo_verbforms, textNo_wordorder, textNo_prepositions, textRu_transliteration, textRu_has_latin.
+Тот у кого больше очков — победитель.
 
-      if (!sourceText) {
-        console.log('❌ ПРОПУСК: нет текста');
+Верни ТОЛЬКО одно слово без кавычек: russian или norwegian`
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({ textRu, textNo })
+          }
+        ]
+      });
+
+      const decision = arbiter.choices[0].message.content.trim().toLowerCase().replace(/"/g, '');
+      console.log(`   ⏱ Арбитр: ${Date.now()-t2}мс`);
+      console.log(`   Решение: ${decision}`);
+
+      if (decision !== 'russian' && decision !== 'norwegian') {
+        console.log('❌ Неверный ответ арбитра — пропускаем');
         isProcessing = false;
         clientWs.send(JSON.stringify({ type: 'ready' }));
         return;
       }
 
+      const isRussian = decision === 'russian';
+      const sourceText = isRussian ? textRu : textNo;
+      const targetLang = isRussian ? 'Norwegian' : 'Russian';
+
+      console.log(`   Источник: "${sourceText}"`);
       clientWs.send(JSON.stringify({ type: 'original', text: sourceText }));
 
-      // Шаг 4 — GPT-4o перевод
-      console.log(`🔄 ШАГ 4: GPT-4o переводит на ${targetLang}...`);
-      const t4 = Date.now();
-      const result = await openai.chat.completions.create({
+      // Шаг 3 — перевод
+      console.log(`\n🔄 ШАГ 3: GPT-4o переводит на ${targetLang}...`);
+      const t3 = Date.now();
+      const translation = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: `Переведи на ${targetLang}. Расставь знаки препинания. Верни ТОЛЬКО перевод.` },
+          {
+            role: 'system',
+            content: `Ты переводчик. Переведи полученный текст на ${targetLang}. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений и без добавлений от себя.`
+          },
           { role: 'user', content: sourceText }
         ]
       });
-      const translated = result.choices[0].message.content.trim();
-      console.log(`   ⏱ GPT-4o: ${Date.now()-t4}мс`);
+      const translated = translation.choices[0].message.content.trim();
+      console.log(`   ⏱ GPT-4o: ${Date.now()-t3}мс`);
       console.log(`   Перевод: "${translated}"`);
 
       clientWs.send(JSON.stringify({ type: 'translated', text: translated }));
 
-      // Шаг 5 — TTS
-      console.log(`🔊 ШАГ 5: OpenAI TTS (${voice})...`);
-      const t5 = Date.now();
+      // Шаг 4 — TTS
+      console.log(`\n🔊 ШАГ 4: OpenAI TTS (onyx)...`);
+      const t4 = Date.now();
       const tts = await openai.audio.speech.create({
         model: 'tts-1',
-        voice: voice,
+        voice: 'onyx',
         input: translated,
         response_format: 'mp3'
       });
-      console.log(`   ⏱ TTS: ${Date.now()-t5}мс`);
+      console.log(`   ⏱ TTS: ${Date.now()-t4}мс`);
 
       const audioOut = Buffer.from(await tts.arrayBuffer()).toString('base64');
       clientWs.send(JSON.stringify({ type: 'audio', data: audioOut }));
 
-      console.log(`⏱ ИТОГО: ${Date.now()-tTotal}мс`);
+      console.log(`\n⏱ ИТОГО: ${Date.now()-tTotal}мс`);
       console.log('✅ ГОТОВО');
       isProcessing = false;
 

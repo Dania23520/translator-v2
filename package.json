@@ -16,9 +16,12 @@
     "@google-cloud/text-to-speech": "^6.4.1",
     "@google/genai": "^2.8.0",
     "@google/generative-ai": "^0.24.1",
+    "dictionary-nb": "^3.0.0",
+    "dictionary-ru": "^3.0.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "franc": "^6.2.0",
+    "natural": "^8.1.1",
     "openai": "^6.42.0",
     "ws": "^8.21.0"
   }

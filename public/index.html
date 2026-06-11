@@ -61,9 +61,8 @@
     let isLocked = false;
     let recordStartTime = null;
 
-    const THRESHOLD = 15;
-    const SILENCE_MS = 3000;
-    const MIN_RECORD_MS = 3000;
+    const THRESHOLD = 25;
+    const SILENCE_MS = 2500;
     const SAMPLE_RATE = 16000;
 
     btn.addEventListener('click', () => {
@@ -96,38 +95,34 @@
           const input = e.inputBuffer.getChannelData(0);
           const volume = getVolume();
 
-          if (!isSpeaking) {
-            isSpeaking = true;
-            pcmData = [];
-            recordStartTime = Date.now();
-            btn.classList.remove('listening');
-            btn.classList.add('recording');
-            status.textContent = '🎤 Запись...';
-          }
-
-          pcmData.push(new Float32Array(input));
-
           if (volume > THRESHOLD) {
+            // Голос есть — начинаем или продолжаем запись
+            if (!isSpeaking) {
+              isSpeaking = true;
+              pcmData = [];
+              recordStartTime = Date.now();
+              btn.classList.remove('listening');
+              btn.classList.add('recording');
+              status.textContent = '🎤 Запись...';
+            }
             if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+            pcmData.push(new Float32Array(input));
           } else {
-            if (!silenceTimer) {
-              silenceTimer = setTimeout(() => {
-                silenceTimer = null;
-                const recordedMs = Date.now() - recordStartTime;
-                if (recordedMs < MIN_RECORD_MS) {
+            // Тишина
+            if (isSpeaking) {
+              pcmData.push(new Float32Array(input));
+              if (!silenceTimer) {
+                silenceTimer = setTimeout(() => {
+                  silenceTimer = null;
                   isSpeaking = false;
-                  pcmData = [];
                   recordStartTime = null;
-                  return;
-                }
-                isSpeaking = false;
-                recordStartTime = null;
-                btn.classList.remove('recording');
-                btn.classList.add('processing');
-                status.textContent = '⏳ Обрабатываю...';
-                isLocked = true;
-                sendAudio();
-              }, SILENCE_MS);
+                  btn.classList.remove('recording');
+                  btn.classList.add('processing');
+                  status.textContent = '⏳ Обрабатываю...';
+                  isLocked = true;
+                  sendAudio();
+                }, SILENCE_MS);
+              }
             }
           }
         };
@@ -154,7 +149,7 @@
         if (msg.type === 'audio') {
           btn.classList.remove('processing');
           btn.classList.add('playing');
-          status.textContent = '🔊 Перевод...';
+          status.textContent = '🔊 Воспроизведение...';
 
           const audio = new Audio('data:audio/mp3;base64,' + msg.data);
           audio.onended = () => {
@@ -164,8 +159,8 @@
             recordStartTime = null;
             if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
             btn.classList.remove('playing');
-            btn.classList.add('recording');
-            if (isActive) status.textContent = '🎤 Запись...';
+            btn.classList.add('listening');
+            if (isActive) status.textContent = '● Слушаю...';
           };
           audio.play().catch(e => {
             console.error('Ошибка:', e);
@@ -180,8 +175,8 @@
           recordStartTime = null;
           if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
           btn.classList.remove('processing');
-          btn.classList.add('recording');
-          if (isActive) status.textContent = '🎤 Запись...';
+          btn.classList.add('listening');
+          if (isActive) status.textContent = '● Слушаю...';
         }
       };
 
