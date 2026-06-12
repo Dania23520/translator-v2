@@ -38,15 +38,15 @@ wss.on('connection', (clientWs) => {
       const audioBase64 = msg.audio;
       const audioBuffer = Buffer.from(audioBase64, 'base64');
 
-      // Шаг 1 — Chirp 3
-      console.log('📡 ШАГ 1: Chirp 3...');
+      // Шаг 1 — Chirp 3 только норвежский
+      console.log('📡 ШАГ 1: Chirp 3 (no-NO)...');
       const t1 = Date.now();
 
       const [response] = await speechClient.recognize({
         recognizer: RECOGNIZER,
         config: {
           autoDecodingConfig: {},
-          languageCodes: ['ru-RU', 'no-NO'],
+          languageCodes: ['no-NO'],
           model: 'chirp_3'
         },
         content: audioBuffer
@@ -56,10 +56,8 @@ wss.on('connection', (clientWs) => {
 
       const result = response.results?.[0];
       const text = result?.alternatives?.[0]?.transcript?.trim() || '';
-      const detectedLang = result?.languageCode || '';
 
       console.log(`   Текст: "${text}"`);
-      console.log(`   Язык: ${detectedLang}`);
 
       if (!text) {
         console.log('❌ ПРОПУСК: пустой текст');
@@ -70,11 +68,8 @@ wss.on('connection', (clientWs) => {
 
       clientWs.send(JSON.stringify({ type: 'original', text }));
 
-      // Шаг 2 — GPT-4o перевод
-      const isRussian = detectedLang.startsWith('ru');
-      const targetLang = isRussian ? 'Norwegian' : 'Russian';
-
-      console.log(`🔄 ШАГ 2: GPT-4o переводит на ${targetLang}...`);
+      // Шаг 2 — GPT-4o перевод на русский
+      console.log('🔄 ШАГ 2: GPT-4o переводит на Russian...');
       const t2 = Date.now();
 
       const translation = await openai.chat.completions.create({
@@ -82,9 +77,7 @@ wss.on('connection', (clientWs) => {
         messages: [
           {
             role: 'system',
-            content: isRussian
-              ? `Ты переводчик с русского на норвежский язык. Переведи текст естественно и правильно. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений.`
-              : `Ты переводчик с норвежского на русский язык. Переведи текст естественно и правильно. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений.`
+            content: `Ты переводчик с норвежского на русский язык. Переведи текст естественно и правильно. Расставь знаки препинания. Верни ТОЛЬКО перевод без объяснений.`
           },
           { role: 'user', content: text }
         ]
@@ -97,15 +90,15 @@ wss.on('connection', (clientWs) => {
       clientWs.send(JSON.stringify({ type: 'translated', text: translated }));
 
       // Шаг 3 — TTS
-      console.log(`🔊 ШАГ 3: OpenAI TTS (onyx)...`);
+      console.log('🔊 ШАГ 3: OpenAI TTS (onyx)...');
       const t3 = Date.now();
 
       const tts = await openai.audio.speech.create({
-  model: 'gpt-4o-mini-tts',
-  voice: 'onyx',
-  input: translated,
-  response_format: 'mp3'
-});
+        model: 'tts-1',
+        voice: 'onyx',
+        input: translated,
+        response_format: 'mp3'
+      });
 
       console.log(`   ⏱ TTS: ${Date.now()-t3}мс`);
 

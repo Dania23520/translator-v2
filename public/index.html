@@ -20,8 +20,8 @@
       border: none; font-size: 20px; cursor: pointer;
       background: #1db954; color: white; transition: all 0.2s;
     }
-    .btn.listening { background: #e53935; transform: scale(1.05); }
-    .btn.recording { background: #ff9800; transform: scale(1.08); }
+    .btn.listening { background: #ff9800; transform: scale(1.05); }
+    .btn.recording { background: #e53935; transform: scale(1.08); }
     .btn.processing { background: #9c27b0; }
     .btn.playing { background: #2196F3; }
     .status { margin-top: 24px; font-size: 16px; color: #aaa; min-height: 24px; }
@@ -54,68 +54,158 @@
     const originalEl = document.getElementById('original');
     const translatedEl = document.getElementById('translated');
 
+    const SILENCE_MS = 1000;
+    const SAMPLE_RATE = 16000;
+    const SILENCE_THRESHOLD = 0.01;
+
     let ws, isActive = false;
-    let audioCtx, analyser, stream, processor;
+    let audioCtx, stream, workletNode, sourceNode;
     let isSpeaking = false, silenceTimer = null;
     let pcmData = [];
     let isLocked = false;
-    let recordStartTime = null;
 
-    const THRESHOLD = 25;
-    const SILENCE_MS = 2500;
-    const SAMPLE_RATE = 16000;
+    const workletCode = `
+      class VolumeProcessor extends AudioWorkletProcessor {
+        process(inputs) {
+          const input = inputs[0][0];
+          if (!input) return true;
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+          const rms = Math.sqrt(sum / input.length);
+          this.port.postMessage({ rms, samples: Array.from(input) });
+          return true;
+        }
+      }
+      registerProcessor('volume-processor', VolumeProcessor);
+    `;
 
     btn.addEventListener('click', () => {
       if (!isActive) start();
       else stop();
     });
 
+    function handleMessage(event) {
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === 'original') {
+        originalEl.textContent = msg.text;
+      }
+
+      if (msg.type === 'translated') {
+        translatedEl.textContent = msg.text;
+      }
+
+      if (msg.type === 'audio') {
+        btn.classList.remove('processing');
+        btn.classList.add('playing');
+        status.textContent = '🔊 Воспроизведение...';
+
+        const audio = new Audio('data:audio/mp3;base64,' + msg.data);
+        audio.onended = () => {
+          isLocked = false;
+          isSpeaking = false;
+          pcmData = [];
+          if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+          btn.classList.remove('playing');
+          btn.classList.add('listening');
+          if (isActive) status.textContent = '● Слушаю...';
+        };
+        audio.play().catch(e => {
+          console.error('Ошибка:', e);
+          isLocked = false;
+        });
+      }
+
+      if (msg.type === 'ready') {
+        isLocked = false;
+        isSpeaking = false;
+        pcmData = [];
+        if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+        btn.classList.remove('processing');
+        btn.classList.add('listening');
+        if (isActive) status.textContent = '● Слушаю...';
+      }
+    }
+
+    function connectWS() {
+      ws = new WebSocket('ws://localhost:3000');
+
+      ws.onopen = () => {
+        console.log('✅ WebSocket подключён');
+        btn.classList.remove('processing', 'playing');
+        if (!isLocked) {
+          btn.classList.add('listening');
+          status.textContent = '● Слушаю...';
+        }
+      };
+
+      ws.onmessage = handleMessage;
+
+      ws.onerror = () => {
+        console.error('WebSocket ошибка');
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket закрыт');
+        if (isActive) {
+          status.textContent = '🔄 Переподключение...';
+          setTimeout(() => {
+            if (isActive) {
+              isLocked = false;
+              isSpeaking = false;
+              pcmData = [];
+              if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+              connectWS();
+            }
+          }, 1000);
+        }
+      };
+    }
+
     async function start() {
       isActive = true;
       btn.textContent = 'Стоп';
       status.textContent = 'Подключение...';
 
-      ws = new WebSocket('ws://localhost:3000');
+      connectWS();
 
-      ws.onopen = async () => {
+      try {
         stream = await navigator.mediaDevices.getUserMedia({
-          audio: { sampleRate: SAMPLE_RATE, channelCount: 1 }
+          audio: { sampleRate: SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }
         });
 
         audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 512;
 
-        const source = audioCtx.createMediaStreamSource(stream);
-        processor = audioCtx.createScriptProcessor(2048, 1, 1);
+        const blob = new Blob([workletCode], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        await audioCtx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
 
-        processor.onaudioprocess = (e) => {
+        sourceNode = audioCtx.createMediaStreamSource(stream);
+        workletNode = new AudioWorkletNode(audioCtx, 'volume-processor');
+
+        workletNode.port.onmessage = (e) => {
           if (isLocked) return;
 
-          const input = e.inputBuffer.getChannelData(0);
-          const volume = getVolume();
+          const { rms, samples } = e.data;
 
-          if (volume > THRESHOLD) {
-            // Голос есть — начинаем или продолжаем запись
+          if (rms > SILENCE_THRESHOLD) {
             if (!isSpeaking) {
               isSpeaking = true;
               pcmData = [];
-              recordStartTime = Date.now();
               btn.classList.remove('listening');
               btn.classList.add('recording');
               status.textContent = '🎤 Запись...';
             }
             if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-            pcmData.push(new Float32Array(input));
+            pcmData.push(new Float32Array(samples));
           } else {
-            // Тишина
             if (isSpeaking) {
-              pcmData.push(new Float32Array(input));
+              pcmData.push(new Float32Array(samples));
               if (!silenceTimer) {
                 silenceTimer = setTimeout(() => {
                   silenceTimer = null;
                   isSpeaking = false;
-                  recordStartTime = null;
                   btn.classList.remove('recording');
                   btn.classList.add('processing');
                   status.textContent = '⏳ Обрабатываю...';
@@ -127,69 +217,18 @@
           }
         };
 
-        source.connect(analyser);
-        source.connect(processor);
-        processor.connect(audioCtx.destination);
+        sourceNode.connect(workletNode);
+        workletNode.connect(audioCtx.destination);
 
         btn.classList.add('listening');
         status.textContent = '● Слушаю...';
-      };
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-
-        if (msg.type === 'original') {
-          originalEl.textContent = msg.text;
-        }
-
-        if (msg.type === 'translated') {
-          translatedEl.textContent = msg.text;
-        }
-
-        if (msg.type === 'audio') {
-          btn.classList.remove('processing');
-          btn.classList.add('playing');
-          status.textContent = '🔊 Воспроизведение...';
-
-          const audio = new Audio('data:audio/mp3;base64,' + msg.data);
-          audio.onended = () => {
-            isLocked = false;
-            isSpeaking = false;
-            pcmData = [];
-            recordStartTime = null;
-            if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-            btn.classList.remove('playing');
-            btn.classList.add('listening');
-            if (isActive) status.textContent = '● Слушаю...';
-          };
-          audio.play().catch(e => {
-            console.error('Ошибка:', e);
-            isLocked = false;
-          });
-        }
-
-        if (msg.type === 'ready') {
-          isLocked = false;
-          isSpeaking = false;
-          pcmData = [];
-          recordStartTime = null;
-          if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-          btn.classList.remove('processing');
-          btn.classList.add('listening');
-          if (isActive) status.textContent = '● Слушаю...';
-        }
-      };
-
-      ws.onerror = () => {
-        status.textContent = 'Ошибка подключения';
-        isLocked = false;
-      };
-    }
-
-    function getVolume() {
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(data);
-      return data.reduce((a, b) => a + b, 0) / data.length;
+      } catch (err) {
+        console.error('Ошибка микрофона:', err);
+        status.textContent = 'Ошибка микрофона';
+        isActive = false;
+        btn.textContent = 'Старт';
+      }
     }
 
     function sendAudio() {
@@ -226,6 +265,8 @@
 
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'audio_chunk', audio: base64 }));
+      } else {
+        isLocked = false;
       }
     }
 
@@ -237,7 +278,8 @@
       btn.textContent = 'Старт';
       btn.classList.remove('listening', 'recording', 'processing', 'playing');
       status.textContent = 'Нажми кнопку чтобы начать';
-      if (processor) processor.disconnect();
+      if (workletNode) workletNode.disconnect();
+      if (sourceNode) sourceNode.disconnect();
       if (stream) stream.getTracks().forEach(t => t.stop());
       if (audioCtx) audioCtx.close();
       if (ws) ws.close();
